@@ -1,6 +1,6 @@
 # 05 · 阅读练习与后续方向
 
-[阅读目录](README.zh.md) · [上一章](04-composer.zh.md)
+[阅读目录](README.zh.md) · [上一章](04-composer.zh.md) · [下一章](06-modules.zh.md)
 
 本章用于检查前三类知识：TypeScript 语法、前后端调用关系和 Agent 执行状态。先完成阅读自测，再探索模型与工具执行。
 
@@ -41,4 +41,4 @@
 本文整理源码阅读与学习练习，不包含真实模型调用的运行验证。继续学习时以当前源码及其所属包文档为依据。
 
 
-[阅读目录](README.zh.md) · [上一章](04-composer.zh.md)
+[阅读目录](README.zh.md) · [上一章](04-composer.zh.md) · [下一章](06-modules.zh.md)
