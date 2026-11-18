@@ -1,6 +1,6 @@
 # 06 · 发送与执行流程中的模块和接口
 
-[阅读目录](README.zh.md) · [上一章](05-practice.zh.md)
+[阅读目录](README.zh.md) · [上一章](05-practice.zh.md) · [下一章](07-web-startup.zh.md)
 
 这里的“接口”指模块向调用者提供的方法、输入和输出，不只指 TypeScript 的 `interface` 关键字。本章是阅读流程时的对照表，不是完整 API 文档。先看谁调用谁，再打开链接检查类型声明。行号对应当前源码，代码更新后请按方法名定位。
 
@@ -59,4 +59,4 @@
 
 用本章检查自己：`SessionPromptValue` 与模型回答是否相同？`turn()` 能否由网页直接远程调用？模型返回工具调用后，哪个模块负责真正执行？回答时同时指出源码文件和方法。
 
-[阅读目录](README.zh.md) · [上一章](05-practice.zh.md)
+[阅读目录](README.zh.md) · [上一章](05-practice.zh.md) · [下一章](07-web-startup.zh.md)
