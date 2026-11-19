@@ -83,6 +83,28 @@ function describe(result: Result): string {
 
 `unknown` 表示尚不知道类型，检查之后才能使用，例如先用 `error instanceof Error` 判断再读取 `error.message`。`any` 放弃相关类型检查。`value as SomeType` 只是让编译器按指定类型理解，不会转换或验证运行时值。
 
+### `invocation satisfies never` 是什么
+
+源码位置：[apps/cli/src/bin.ts](../../apps/cli/src/bin.ts)，`runCli()` 的 `switch` 默认分支：
+
+```text
+default:
+  invocation satisfies never
+  throw new Error(`dsh: unhandled invocation mode ${JSON.stringify(invocation)}`)
+```
+
+`satisfies` 要求左边表达式的类型满足右边的类型。`never` 表示没有可能的值。这里要求编译器确认：前面的分支已经处理了 `invocation` 的全部可能类型，到了 `default` 不应再有剩余情况。这叫穷尽性检查。
+
+例如教学用联合类型只有 `{ mode: 'web' }` 和 `{ mode: 'help' }` 两种情况，`switch` 分别处理它们后，默认分支里的变量可以缩窄为 `never`。如果后来增加 `{ mode: 'desktop' }` 却忘记添加对应分支，默认分支仍可能接收到 desktop 类型，`satisfies never` 就会产生类型错误，提醒开发者补齐处理。
+
+| 代码 | 作用 |
+|---|---|
+| `invocation satisfies never` | 类型检查时确认没有遗漏情况；不会进行运行时验证或类型转换 |
+| `throw new Error(...)` | 运行时如果真的进入该分支，抛错停止当前执行 |
+| `invocation as never` | 强制告诉编译器按 `never` 理解，可能掩盖遗漏，不提供同样的检查 |
+
+运行源码的 tsx 转换不等于完整类型检查，因此仍需依靠项目的类型检查流程发现这种遗漏。`satisfies` 的类型约束在运行时被移除，真正报告运行时异常的是后面的 `throw`。
+
 ## 7. 泛型和常用类型工具
 
 泛型用类型参数保留输入与输出的关系。例如 `function first<T>(items: T[]): T | undefined` 表示：输入元素类型为 `T` 的数组，返回一个 `T` 或 `undefined`。传入字符串数组，返回类型就是 `string | undefined`。尖括号里的类型不是运行时参数。

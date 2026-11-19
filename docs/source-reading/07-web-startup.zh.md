@@ -117,6 +117,95 @@ Node.js 加载 tsx/esm
 
 参数解析完成后，`runCli()` 进入 profile 分支并调用 `runProfile()`，启动名为 `web` 的插件组合。
 
+### `import.meta.main` 如何判断入口
+
+源码位置：[apps/cli/src/bin.ts](../../apps/cli/src/bin.ts)，文件末尾：
+
+```text
+if (import.meta.main) {
+  await runCli()
+}
+```
+
+`import.meta` 是当前 ESM 模块的元信息对象，不是导入名为 meta 的模块。运行环境提供的 `.main` 属性表示当前模块是否为程序入口。
+
+用 `node --import tsx/esm apps/cli/src/bin.ts web` 直接启动时，`bin.ts` 是入口，条件为真，于是调用 `runCli()`。若其他文件通过 `import { runCli } from './bin.ts'` 导入它，`bin.ts` 的条件为假，不会在这个 `if` 中自动启动 CLI；调用方可以自己决定何时调用 `runCli()`。被导入时，其他顶层代码仍会执行，不是整个文件都被跳过。
+
+这种写法让文件既能直接运行，也能作为模块供其他入口使用。用途类似 Python 的 `if __name__ == '__main__'`。`.main` 不是所有运行环境或旧版 Node.js 都具备的属性，应使用项目支持的运行环境。
+
+### `web` 在哪里变成 `--profile web`
+
+在 [apps/cli/src/args.ts](../../apps/cli/src/args.ts) 第 206 行，`parseDshArgs()` 检查第一个参数。只要它存在、不以 `-` 开头且不是 `plugin`，就会在参数数组前加上 `'--profile'`。因此 `['web']` 变成 `['--profile', 'web']`。`...argv` 在这里是数组展开，把原数组中的每个参数依次放进新数组。其他 profile 名称也走这段通用逻辑。
+
+### `program.parse()` 的实现在哪里
+
+`program` 是 `new Command()` 创建的 Commander 实例。项目在 `apps/cli/src/args.ts:209` 调用 `program.parse(expanded, { from: 'user' })`。安装依赖后，可以在 `apps/cli/node_modules/commander/lib/command.js` 搜索 `parse(argv, parseOptions)`，当前安装版本位于第 1081 行。
+
+`parse()` 先调用 `_prepareUserArgs()`。`from: 'user'` 表示传入的数组已经只包含用户参数，因此无需再跳过 Node 和脚本路径。然后 `_parseCommand()` 按 `.option('--profile <name>', ...)` 解析参数并触发项目注册的 `.action()` 回调，回调收到 `options.profile === 'web'`。`parse()` 返回 `program` 自身，启动指令由回调赋给 `resolved`，再由 `parseDshArgs()` 返回。
+
+### `.action()` 参数中的 `BootOptions & { profile?: string }`
+
+`&` 表示交叉类型，要求 `options` 同时满足两边的类型。它保留 `BootOptions` 定义的 `patch`、`dumpConfig` 等字段，并允许包含可选的字符串字段 `profile`。省略 `profile` 时，读取 `options.profile` 得到 `undefined`。第 174 行的回调会检查这种情况，让单独的 `dsh -h` 显示启动器帮助，普通启动缺少 profile 时则报错。Commander 根据命令行设置字段，这段类型只供 TypeScript 检查。
+
+### `resolveBoot()` 怎样决定是否启动
+
+在 `apps/cli/src/args.ts:111`，`resolveBoot()` 接收已经解析好的 `profile`、`options` 和应用参数 `args`。`options.patch ?? []` 在没有补丁时得到空数组。三个配置预览选项组成数组后，`.filter(Boolean)` 去掉未启用的项，`dumps.length` 就是开启的预览选项数。
+
+| 输入 | `resolveBoot()` 返回的关键字段 |
+|---|---|
+| `dsh web` | `mode: 'profile'`，随后启动 Web |
+| `dsh web --dump-config` | `mode: 'dump-config'`，打印合成配置 |
+| `dsh web --dump-default-config` | `mode: 'dump-config'` 和 `defaultOnly: true`，打印默认配置 |
+| `dsh web --dump-config-schema` | `mode: 'dump-config-schema'`，打印配置的 JSON Schema |
+
+普通 `dsh web` 的 `dumps` 是空数组，直接走 `dumps.length === 0` 的 `return`。返回对象里的 `profile,` 是 `profile: profile` 的简写，值仍然是 `'web'`。预览命令会继续检查参数组合，例如同时开启两个预览选项，或给预览命令附加应用参数，都会报错。
+
+### Web 在 `runCli()` 中走哪个分支
+
+源码位置：[apps/cli/src/args.ts](../../apps/cli/src/args.ts) 的 `resolveBoot()` 与 [apps/cli/src/bin.ts](../../apps/cli/src/bin.ts) 的 `runCli()`。普通 Web 启动参数解析后的关键字段相当于：
+
+```text
+{
+  mode: 'profile',
+  profile: 'web',
+  patches: [],
+  args: [],
+}
+```
+
+`mode` 表示要执行哪类操作，`profile` 表示具体启动哪个配置组合。`switch (invocation.mode)` 因此走 `case 'profile'`，将 `invocation.profile` 的值 `'web'` 传给 `runProfile()`；不存在为了普通 Web 启动而进入 `case 'web'` 的步骤。此处示意省略了其他字段；配置预览等命令会进入对应的其他模式。
+
+```text
+命令行 web
+  → 展开为 ['--profile', 'web']
+  → Commander parse() 执行 .action() 回调
+  → resolveBoot() 构造启动指令
+  → mode 为 profile，profile 为 web
+  → runCli() 的 case 'profile'
+  → runProfile({ profile: 'web', ... })
+```
+
+### 为什么在分支中动态导入
+
+源码位置：[apps/cli/src/bin.ts](../../apps/cli/src/bin.ts)，`case 'profile'` 内：
+
+```text
+const { runProfile } = await import('./profile-boot.ts')
+```
+
+`import(...)` 是动态导入表达式，返回 Promise；`await` 等待模块加载，`{ runProfile }` 从模块导出对象中取出函数。加载模块和调用函数是两步，后面的 `await runProfile(...)` 才真正调用它。
+
+把这句放在分支里，意味着先解析命令，再按所选命令加载实现。相比在文件顶部静态导入，它可以避免其他分支因为这条依赖而加载 profile 启动模块及其依赖，也把该模块的顶层初始化推迟到需要时。帮助、版本等简单命令因此可以减少无关加载工作；具体能提速多少需要测量，不能仅从写法得出数据。
+
+动态导入也有代价：执行到这一行时才等待加载，并可能在这里出现加载失败。这里的导入位于后续 `try` 之外，加载失败不会被下面专门处理 `runProfile()` 启动错误的 `catch` 捕获。正常情况下，相同模块会被缓存，不是每次动态导入都重新执行整个模块。
+
+| 写法 | 含义 |
+|---|---|
+| `node --import tsx/esm ...` | Node 启动选项，主程序执行前预加载模块 |
+| `import { runProfile } from './profile-boot.ts'` | 静态导入，声明当前模块的依赖 |
+| `await import('./profile-boot.ts')` | 动态导入，执行到表达式时加载模块 |
+| `import.meta.main` | 读取当前模块的入口身份，不是导入操作 |
+
 ## 6. 启动过程中经过哪些源码
 
 | 顺序 | 源码文件 | 要找的方法或内容 | 作用 |
@@ -161,12 +250,12 @@ corepack pnpm dsh web --dump-config
 
 ## 8. 自测与已有问题索引
 
-尝试解释：谁执行 `dev:web` 脚本？`--import` 在入口文件之前还是之后生效？`tsx/esm` 怎样对应到实际文件？`web` 为什么会出现在 `process.argv.slice(2)` 中？调整插件配置与调整 Vite 构建配置有什么区别？
+尝试解释：谁执行 `dev:web` 脚本？`--import` 在入口文件之前还是之后生效？`tsx/esm` 怎样对应到实际文件？`web` 为什么会出现在 `process.argv.slice(2)` 中？调整插件配置与调整 Vite 构建配置有什么区别？直接启动与导入 `bin.ts` 时，`import.meta.main` 有何区别？为什么 `web` 对应的是 `profile` 分支？动态导入是否会自动调用导出的函数？
 
 此前涉及的其他源码阅读问题已有对应章节：
 
 - [前后端使用什么技术](01-stack.zh.md)：React、Node.js、Cordis 和 Remote 的职责。
-- [阅读源码需要哪些 TypeScript 知识](02-typescript.zh.md)：类型、回调、异步与模块语法。
+- [阅读源码需要哪些 TypeScript 知识](02-typescript.zh.md)：类型、回调、异步、模块语法和 `satisfies never` 穷尽性检查。
 - [点击发送后由哪个服务接收请求](03-send-message.zh.md)：前端请求到服务端 Controller 的路线。
 - [InputBar 是否是通用按钮](04-composer.zh.md)：会话输入栏与按钮、状态机之间的关系。
 - [流程有哪些参与模块及接口](06-modules.zh.md)：方法输入、输出和上下游关系。
