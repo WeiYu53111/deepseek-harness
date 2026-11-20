@@ -47,6 +47,16 @@ corepack pnpm run start:web
 
 `start:web` 不负责补齐构建产物，它映射到下一节的 Node 命令。Web 默认监听 `127.0.0.1:3080`；默认值位于 [packages/bundle/web-app/cordis.patch.yml](../../packages/bundle/web-app/cordis.patch.yml) 的 `webserver` 条目。查看启动参数可使用 `corepack pnpm dsh web --help`，指定端口和禁止自动打开浏览器可使用 `corepack pnpm dsh web --port 3081 --no-open`。
 
+### 按 F5 前为什么要构建
+
+构建产物是构建工具从源码生成的文件。例如，Vite 会把页面源码构建成浏览器加载的 HTML、JavaScript 和 CSS，放在 `apps/web/dist/`。项目的 `build:artifacts` 还准备运行时依赖的工作区包产物。Web 启动后，后端从构建目录读取页面资源并发送给浏览器。
+
+1. 缺少产物或需要更新产物时，在仓库根目录运行 `corepack pnpm run build:artifacts`，等命令成功结束。
+2. 用 VS Code 打开仓库，在「运行和调试」中选择 **DSH Web：调试源码启动**。这个配置等同于运行 `start:web`，会从 `bin.ts` 启动 Node 调试会话。[launch.json](../../.vscode/launch.json)
+3. 在 `runCli()` 打断点，按 **F5** 启动。停住后可用 **F11** 进入 `parseDshArgs()`，或在 `runProfile()` 设置断点并用 **F5** 继续到那里。页面交互则可在浏览器开发者工具中调试。[CLI 入口](../../apps/cli/src/bin.ts) · [Profile 启动](../../apps/cli/src/profile-boot.ts)
+
+已有可用产物时，可以直接按 **F5**。调试命令中的 `tsx/esm` 会在 Node 加载 CLI 源码时处理 TypeScript 语法，因此无需先手动生成 `bin.js`。浏览器资源仍由构建脚本准备。
+
 ## 3. 拆解 Node 启动命令
 
 ```powershell
@@ -100,6 +110,28 @@ Node.js 加载 tsx/esm
 ```
 
 `tsx` 工具包与 `.tsx` 文件扩展名不要混淆。前者是运行工具；后者表示可包含 JSX 的 TypeScript 文件，常用于 React 组件。这里使用 `tsx/esm` 与是否编写 React 页面没有直接关系。
+
+### 没有 `tsx/esm` 时，Node 能运行 TypeScript 吗
+
+在仓库根目录创建示例文件 `hello.ts`。这里的 `: string` 分别标注参数和返回值的类型。
+
+```text
+function greet(name: string): string {
+  return `你好，${name}`
+}
+
+console.log(greet('小明'))
+```
+
+运行 `node --import tsx/esm hello.ts` 会打印 `你好，小明`。加载时，tsx 处理类型标注，执行效果相当于用 JavaScript 写 `function greet(name) { ... }`。
+
+| 情况 | 结果 |
+|---|---|
+| 保留 `--import tsx/esm`，但 Node 找不到 `tsx` 包 | 预加载失败，报 `ERR_MODULE_NOT_FOUND`，入口文件还未执行 |
+| 在 Node.js 24 里运行 `node hello.ts` | 这个例子也能运行，Node 自带的类型擦除会移除其中的标注 |
+| 源码使用 `enum Mode { Web, Cli }`，并按 Node.js 24 默认方式直接运行 | `enum` 需要生成运行时对象，默认的类型擦除无法处理。tsx 可以转换它 |
+
+因此，能用 `node hello.ts` 运行这个小例子，说明它用到的语法在 Node 的原生支持范围内。仓库的 `start:web` 和调试配置使用 `tsx/esm` 来加载项目源码。
 
 ## 5. web 参数怎样进入程序
 
@@ -219,7 +251,27 @@ const { runProfile } = await import('./profile-boot.ts')
 | 7 | [apps/web/index.html](../../apps/web/index.html) | `#root`、模块脚本 | 浏览器加载页面入口 |
 | 8 | [apps/web/src/main.ts](../../apps/web/src/main.ts) | `new AppWebEntry(el)`、`entry.run()` | 启动浏览器侧应用 |
 
-Node 后端与浏览器前端分别有入口。执行 `bin.ts` 会启动后端应用；浏览器拿到页面资源后才执行 `main.ts`。组件渲染和页面按钮处理发生在后一个阶段。
+### 后端怎样通过 Cordis 启动
+
+这条启动链在 Node.js 中运行。Cordis 负责组合和加载插件，HTTP 监听由 WebServer 插件通过 Node.js 的 `node:http` 或 `node:https` 建立。这个项目的 Web 后端使用这套 Node.js 技术栈，Flask 则是 Python 的 Web 框架。
+
+1. `runProfile()` 确定 profile 的根配置路径，调用 `readProfilePatches()` 取得补丁，然后把两者和准备回调交给 `boot()`。从 `boot(NAME, rootConfig, ...)` 定位调用。[profile-boot.ts](../../apps/cli/src/profile-boot.ts)
+2. `boot()` 创建 `new Context()`，通过 `await ctx.plugin(Loader)` 安装加载器，再用 `await prepare?.(ctx)` 调用传入的准备回调。插件通过 Cordis 的 `ctx` 提供和获取服务。[app-boot/src/index.ts](../../packages/boot/app-boot/src/index.ts)
+3. `mountRootInclude()` 创建一条 `cordis:include` 配置项，用 `config.path` 指定根配置文件，并附上补丁。它调用 `ctx.loader.create(rootInclude)`，让 Loader 展开配置并加载插件。随后 `boot()` 等待 Loader 完成并检查启动结果。[mountRootInclude 实现](../../packages/boot/app-boot/src/index.ts)
+4. Web bundle 的 `id: webserver` 指定了提供监听服务的插件。该插件最终调用 `this.server.listen(this.config.port, this.config.host, ...)`，此时 Node.js 开始建立监听。[Web 插件配置](../../packages/bundle/web-app/cordis.patch.yml) · [监听实现](../../packages/host/webserver/src/index.ts)
+
+调试时可以依次在 `ctx.plugin(Loader)`、`ctx.loader.create(rootInclude)` 和 `this.server.listen(...)` 打断点，分别观察加载器安装、根配置与补丁，以及最终监听的地址和端口。
+
+### 浏览器在哪里真正挂载 React
+
+`runProfile()` 启动后端，后端为浏览器提供页面资源。浏览器打开页面后，才开始执行前端代码。React 的实际挂载点是 `mountApp()`。[React 渲染器](../../packages/client/ui-renderer/src/client/index.ts)
+
+1. 浏览器拿到由 Web 构建产物提供的页面。源码模板中，`index.html` 提供 `<div id="root">`，并声明模块入口 `main.ts`。[index.html](../../apps/web/index.html)
+2. `main.ts` 取得 `#root`，创建 `new AppWebEntry(el)`，再调用 `entry.run()`。这个方法先执行 `bootClient()`，然后调用 `mountClient(ctx, this.container)`。[main.ts](../../apps/web/src/main.ts) · [boot.ts](../../packages/client/web/src/boot.ts)
+3. `mountClient()` 通过 Cordis 获取 `uiRenderer` 服务，在挂载效果中调用 `scope.uiRenderer.mount(container)`。[mount.ts](../../packages/client/web/src/mount.ts)
+4. `uiRenderer.mount()` 调用 `mountApp(container, buildRenderApp({ ctx }))`。如果容器已有启动页 DOM，`hydrateRoot()` 先接管它，再切换到应用界面。否则走 `createRoot(container)` 和 `root.render(app())`。[ui-renderer/src/client/index.ts](../../packages/client/ui-renderer/src/client/index.ts)
+
+在浏览器开发者工具的 Sources 中给 `mountApp()` 打断点，再刷新页面，可以观察 `container` 和 `boot`。后端启动的断点则放在 VS Code 的 Node 调试会话里。
 
 ## 7. 有哪些配置文件
 
