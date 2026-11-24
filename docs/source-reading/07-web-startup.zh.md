@@ -262,6 +262,25 @@ const { runProfile } = await import('./profile-boot.ts')
 
 调试时可以依次在 `ctx.plugin(Loader)`、`ctx.loader.create(rootInclude)` 和 `this.server.listen(...)` 打断点，分别观察加载器安装、根配置与补丁，以及最终监听的地址和端口。
 
+### 从配置到插件，代码怎样分工
+
+Web 和 headless 复用同一套启动逻辑。Profile 描述本次要运行的插件组合，Loader 把配置项变成运行中的插件，每个插件实现自身的功能。
+
+| 代码 | 负责什么 |
+|---|---|
+| `composeProfile()` 和 `readProfilePatches()` | 找到 profile，确定插件包的解析方式，收集 bundle 配置和补丁 |
+| `runProfile()` | 准备环境、命令行参数和退出处理，将本次启动所需的数据交给 `boot()` |
+| `boot()` 和 Loader | 创建 Cordis 上下文，读取根配置并应用补丁，加载插件并检查启动结果 |
+| WebServer 插件 | 接收地址和端口，调用 Node.js 的 `server.listen()` |
+
+以 WebServer 为例，配置项的 `id: webserver` 标识这一项，补丁可按该 ID 修改它。条目中的 `name` 指定 Loader 要加载的插件包，`config` 提供插件运行所需的参数。端口从 `config.port` 传给插件，最后由插件通过 `this.config.port` 传给 `server.listen()`。同一个 WebServer 可以用不同的端口启动，通用的 `boot()` 只需处理统一的插件配置结构。[配置条目](../../packages/bundle/web-app/cordis.patch.yml) · [监听代码](../../packages/host/webserver/src/index.ts)
+
+`boot()` 和 `runProfile()` 用 `prepare(ctx)` 回调交接启动数据。`boot()` 掌握调用时机，在创建上下文、安装 Loader 之后和加载配置树之前执行回调。`runProfile()` 掌握本次启动需要提供的数据，例如 profile 信息、环境变量快照和命令行参数。这样，配置树中的插件一开始就能从上下文获取这些数据。[runProfile 实现](../../apps/cli/src/profile-boot.ts) · [boot 实现](../../packages/boot/app-boot/src/index.ts)
+
+`runProfile()` 也管理退出。准备回调会先把上下文保存到 `app.current`，这样 `boot()` 尚未返回时收到停止信号，也能清理已创建的上下文。`dispose()` 用 `??=` 保存第一次清理的 Promise，后续调用复用它。启动成功且应用仍处于活动状态时，`appReady.commit()` 通知等待启动的代码。
+
+调试时可以先在 `boot(...)` 前查看 `options.profile`、`rootConfig` 和 `profileContext.startedBundles`，再在 `server.listen()` 查看最终端口。沿着端口的传递路径，就能看到配置、启动器和插件各自负责哪一步。
+
 ### 浏览器在哪里真正挂载 React
 
 `runProfile()` 启动后端，后端为浏览器提供页面资源。浏览器打开页面后，才开始执行前端代码。React 的实际挂载点是 `mountApp()`。[React 渲染器](../../packages/client/ui-renderer/src/client/index.ts)
@@ -299,6 +318,30 @@ corepack pnpm dsh web --dump-config
 ```
 
 这个命令用于理解最终插件树。Vite 配置负责前端构建，Cordis patch 负责运行时插件组合，两者处理的阶段不同。
+
+### Profile 和 patch 分别记录什么
+
+**Profile 是一套启动方案，patch 是对插件配置列表的一组修改。** 例如 `dsh web` 选中 `web` profile。这个 profile 目录下的 `package.json` 用 `dsh.profile.bundles` 记录按顺序选用的 bundle。同目录的 `cordis.patch.yml` 可以继续定制该方案。bundle 也会提供自己的 patch，所以一次启动可以应用多份 patch。[Profile 配置说明](../../packages/boot/app-boot/README.zh.md)
+
+| 配置例子 | 内容 | 加载后的效果 |
+|---|---|---|
+| Web bundle 的 `insert` | 添加 `id: webserver`，`name` 指向 WebServer 插件包，`inject` 声明依赖 `webStartup`，`config` 传入地址和端口 | WebServer 用收到的配置建立监听，缺省端口为 `3080`。[Web bundle patch](../../packages/bundle/web-app/cordis.patch.yml) |
+| Headless bundle 的 `insert` | 添加 `id: headless-runner`，从 `headlessStartup` 获取任务、会话 ID 和 JSON 输出选项 | 启动一次命令行任务。[Headless bundle patch](../../packages/bundle/headless/cordis.patch.yml) |
+| Headless bundle 的 `id: hmr` 和 `disabled: true` | 按 ID 找到基础 bundle 已有的热重载条目，将它禁用 | Headless 不启用该热重载插件。[Headless bundle patch](../../packages/bundle/headless/cordis.patch.yml) |
+
+`id` 标识配置条目，后续 patch 可以据此修改同一项。不同 profile 可以用同一套加载逻辑，分别从自己的 bundle 和覆盖文件得到最终的插件列表。
+
+### Windows 在哪里找到 `profiles`
+
+`$DSH_HOME/profiles` 中的 `$DSH_HOME` 代表 DSH 实际使用的用户目录。如果设置了 `DSH_HOME` 环境变量，CLI 使用该位置。否则默认使用 Node.js 识别的用户主目录下的 `.dsh`。因此环境变量为空时，仍可以有 `profiles` 目录。启动 `dsh web` 时，程序会按需初始化对应的 Web profile。[用户目录解析](../../packages/util/home-paths/src/index.ts) · [Profile 加载](../../packages/boot/app-boot/src/profile.ts)
+
+在使用默认目录的 Windows 环境中，打开 PowerShell 查看 Web profile 的文件：
+
+```powershell
+Get-ChildItem -Force "$env:USERPROFILE\.dsh\profiles\web"
+```
+
+如果设置了 `DSH_HOME`，改用 `Get-ChildItem -Force (Join-Path $env:DSH_HOME 'profiles\web')` 查看。目录中的 `package.json` 是实际选择 bundle 的位置，前面链接的 bundle patch 则描述各自对插件条目的修改。
 
 ## 8. 自测与已有问题索引
 
